@@ -1042,6 +1042,7 @@ function QuickBar:Bind(library, window, opts)
 
     bar.Name = "QuickBar"
     bar.Active = true
+    bar.AnchorPoint = Vector2.new(0.5, 0.5)
 
     bar.Size = UDim2.new(
         0,
@@ -1053,11 +1054,11 @@ function QuickBar:Bind(library, window, opts)
     bar.Position =
         opts.Position
         or UDim2.new(
-            0,
-            12,
-            0.5,
-            -barH / 2
-        )
+         0.5,
+         0,
+         0.5,
+         0
+    )   
 
     bar.BackgroundColor3 =
         library.Theme.Base
