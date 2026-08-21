@@ -22,7 +22,8 @@ local EZ = {
     _errorLog = {},
     _onError = nil,
     _activeDrag = nil, -- mutex so picker drag doesn't bleed into slider
-    _version = "3.2.0"
+    _destroyed = false,
+    _version = "3.2.1"
 }
 
 -- defaults
@@ -44,6 +45,15 @@ local DEFAULT_THEME = {
 }
 
 EZ.Theme = DEFAULT_THEME
+
+-- Track every RBXScriptConnection created by the library so EZ:Destroy()
+-- can reliably disconnect callbacks, including global UserInputService
+-- and Players connections.
+local function trackConnection(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(EZ._connections, connection)
+    return connection
+end
 
 -- preset themes (devs love these)
 EZ.Themes = {
@@ -639,10 +649,10 @@ function EZ:KeySystem(opts)
         Parent = inputBg
     })
 
-    keyInput.Focused:Connect(function()
+    trackConnection(keyInput.Focused, function()
         tween(keyStroke, {Color = theme.Accent, Transparency = 0}, 0.15)
     end)
-    keyInput.FocusLost:Connect(function()
+    trackConnection(keyInput.FocusLost, function()
         tween(keyStroke, {Color = theme.Border, Transparency = 0.5}, 0.15)
     end)
 
@@ -684,10 +694,10 @@ function EZ:KeySystem(opts)
         Parent = submitBtn
     })
 
-    submitBtn.MouseEnter:Connect(function()
+    trackConnection(submitBtn.MouseEnter, function()
         tween(submitBtn, {BackgroundColor3 = theme.AccentDark}, 0.15)
     end)
-    submitBtn.MouseLeave:Connect(function()
+    trackConnection(submitBtn.MouseLeave, function()
         tween(submitBtn, {BackgroundColor3 = theme.Accent}, 0.15)
     end)
 
@@ -745,15 +755,15 @@ function EZ:KeySystem(opts)
             Parent = row
         })
 
-        linkBtn.MouseEnter:Connect(function()
+        trackConnection(linkBtn.MouseEnter, function()
             tween(linkBtn, {BackgroundTransparency = 0.05}, 0.15)
             tween(linkStroke, {Color = theme.Accent, Transparency = 0.2}, 0.15)
         end)
-        linkBtn.MouseLeave:Connect(function()
+        trackConnection(linkBtn.MouseLeave, function()
             tween(linkBtn, {BackgroundTransparency = 0.2}, 0.15)
             tween(linkStroke, {Color = theme.Border, Transparency = 0.5}, 0.15)
         end)
-        linkBtn.MouseButton1Click:Connect(function()
+        trackConnection(linkBtn.MouseButton1Click, function()
             pcall(function() setclipboard(opts.GetKeyLink) end)
             linkLbl.Text = "Link copied!"
             linkLbl.TextColor3 = theme.Success
@@ -826,8 +836,8 @@ function EZ:KeySystem(opts)
         end
     end
 
-    submitBtn.MouseButton1Click:Connect(tryKey)
-    keyInput.FocusLost:Connect(function(enter)
+    trackConnection(submitBtn.MouseButton1Click, tryKey)
+    trackConnection(keyInput.FocusLost, function(enter)
         if enter then tryKey() end
     end)
 
@@ -838,6 +848,7 @@ function EZ:KeySystem(opts)
 end
 
 function EZ:CreateWindow(opts)
+    self._destroyed = false
     opts = opts or {}
     local theme = self.Theme
     local mobile = isMobile()
@@ -1045,18 +1056,31 @@ function EZ:CreateWindow(opts)
         Visible = not mobile,
     })
 
-    searchBox.Focused:Connect(function()
+    trackConnection(searchBox.Focused, function()
         tween(searchStroke, {Color = theme.Accent, Transparency = 0.2}, 0.15)
     end)
-    searchBox.FocusLost:Connect(function()
+    trackConnection(searchBox.FocusLost, function()
         tween(searchStroke, {Color = theme.Border, Transparency = 0.5}, 0.15)
     end)
+
+    -- Dedicated drag handle. Keeping controls outside this hit area prevents
+    -- minimize/close/search clicks from also starting a window drag.
+    local dragHandle = create("TextButton", {
+        Name = "EZDragHandle",
+        Size = UDim2.new(1, -(110 + searchBarW + 12), 1, 0),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "",
+        AutoButtonColor = false,
+        ZIndex = 6,
+        Parent = header,
+    })
 
     -- mobile: tap icon to expand. expanded bar sits ABOVE the buttons row
     -- (full width minus padding) so it doesnt clip the close/min/toggle.
     -- a small × at the right of the expanded bar lets users collapse it.
     local mobileExpanded = false
-    local closeBtn
+    local searchCloseBtn
     if mobile then
         local tapBtn = create("TextButton", {
             Size = UDim2.fromScale(1, 1),
@@ -1067,7 +1091,7 @@ function EZ:CreateWindow(opts)
         })
 
         -- close icon that appears only when expanded, used to collapse
-        closeBtn = create("TextButton", {
+        searchCloseBtn = create("TextButton", {
             Size = UDim2.new(0, 22, 1, 0),
             Position = UDim2.new(1, -22, 0, 0),
             BackgroundTransparency = 1,
@@ -1084,19 +1108,19 @@ function EZ:CreateWindow(opts)
             ImageColor3 = theme.TextMuted,
             ScaleType = Enum.ScaleType.Fit,
             ZIndex = 11,
-            Parent = closeBtn,
+            Parent = searchCloseBtn,
         })
 
         local function collapse()
             mobileExpanded = false
             searchBox.Text = ""
             searchBox.Visible = false
-            closeBtn.Visible = false
+            searchCloseBtn.Visible = false
             tween(searchBar, {Size = UDim2.new(0, 28, 0, 26), Position = UDim2.new(1, -(110 + 28 + 6), 0.5, -13), BackgroundTransparency = 0.4}, 0.2)
             if window._applySearch then window:_applySearch("") end
         end
 
-        tapBtn.MouseButton1Click:Connect(function()
+        trackConnection(tapBtn.MouseButton1Click, function()
             if mobileExpanded then return end
             mobileExpanded = true
             searchBox.Visible = true
@@ -1105,15 +1129,15 @@ function EZ:CreateWindow(opts)
             -- place expanded bar near the right edge but stop short of the action buttons
             -- header buttons take ~110px; pad 6px gap. Use full width so search has room.
             tween(searchBar, {Size = UDim2.new(1, -130, 0, 26), Position = UDim2.new(0, 12, 0.5, -13), BackgroundTransparency = 0}, 0.2)
-            closeBtn.Visible = true
+            searchCloseBtn.Visible = true
             task.delay(0.22, function()
                 if mobileExpanded then searchBox:CaptureFocus() end
             end)
         end)
 
-        closeBtn.MouseButton1Click:Connect(collapse)
+        trackConnection(searchCloseBtn.MouseButton1Click, collapse)
         -- also collapse if user taps elsewhere & box loses focus with no text
-        searchBox.FocusLost:Connect(function()
+        trackConnection(searchBox.FocusLost, function()
             if mobileExpanded and searchBox.Text == "" then
                 task.wait(0.1)
                 if mobileExpanded and searchBox.Text == "" then collapse() end
@@ -1152,12 +1176,12 @@ function EZ:CreateWindow(opts)
         end
     end
 
-    searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    trackConnection(searchBox:GetPropertyChangedSignal("Text"), function()
         window:_applySearch(searchBox.Text)
     end)
 
     -- close button
-    local closeBtn = create("TextButton", {
+    local windowCloseBtn = create("TextButton", {
         Size = UDim2.new(0, 24, 0, 24),
         Position = UDim2.new(1, -36, 0.5, -12),
         BackgroundColor3 = theme.Error,
@@ -1176,15 +1200,15 @@ function EZ:CreateWindow(opts)
         ImageColor3 = theme.Text,
         ScaleType = Enum.ScaleType.Fit,
         ZIndex = 8,
-        Parent = closeBtn,
+        Parent = windowCloseBtn,
     })
-    addCorner(closeBtn, 6)
+    addCorner(windowCloseBtn, 6)
 
-    closeBtn.MouseEnter:Connect(function()
-        tween(closeBtn, {BackgroundTransparency = 0.2}, 0.15)
+    trackConnection(windowCloseBtn.MouseEnter, function()
+        tween(windowCloseBtn, {BackgroundTransparency = 0.2}, 0.15)
     end)
-    closeBtn.MouseLeave:Connect(function()
-        tween(closeBtn, {BackgroundTransparency = 0.6}, 0.15)
+    trackConnection(windowCloseBtn.MouseLeave, function()
+        tween(windowCloseBtn, {BackgroundTransparency = 0.6}, 0.15)
     end)
 
     -- minimize button
@@ -1211,10 +1235,10 @@ function EZ:CreateWindow(opts)
     })
     addCorner(minBtn, 6)
 
-    minBtn.MouseEnter:Connect(function()
+    trackConnection(minBtn.MouseEnter, function()
         tween(minBtn, {BackgroundTransparency = 0.2}, 0.15)
     end)
-    minBtn.MouseLeave:Connect(function()
+    trackConnection(minBtn.MouseLeave, function()
         tween(minBtn, {BackgroundTransparency = 0.6}, 0.15)
     end)
 
@@ -1302,17 +1326,17 @@ function EZ:CreateWindow(opts)
     end
     local function endDrag() dragging = false end
 
-    header.InputBegan:Connect(function(inp)
+    trackConnection(dragHandle.InputBegan, function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
             beginDrag(Vector2.new(inp.Position.X, inp.Position.Y))
         end
     end)
-    UserInputService.InputChanged:Connect(function(inp)
+    trackConnection(UserInputService.InputChanged, function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
             updateDrag(Vector2.new(inp.Position.X, inp.Position.Y))
         end
     end)
-    UserInputService.InputEnded:Connect(function(inp)
+    trackConnection(UserInputService.InputEnded, function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
             endDrag()
         end
@@ -1379,7 +1403,7 @@ function EZ:CreateWindow(opts)
     local pillDrag, pillDragStart, pillStartPos = false, nil, nil
     local pillMoved = false
 
-    togglePill.InputBegan:Connect(function(inp)
+    trackConnection(togglePill.InputBegan, function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
             pillDrag = true
             pillMoved = false
@@ -1387,7 +1411,7 @@ function EZ:CreateWindow(opts)
             pillStartPos = togglePill.Position
         end
     end)
-    UserInputService.InputChanged:Connect(function(inp)
+    trackConnection(UserInputService.InputChanged, function(inp)
         if not pillDrag then return end
         if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
             local pos = Vector2.new(inp.Position.X, inp.Position.Y)
@@ -1396,7 +1420,7 @@ function EZ:CreateWindow(opts)
             togglePill.Position = UDim2.new(pillStartPos.X.Scale, pillStartPos.X.Offset + delta.X, pillStartPos.Y.Scale, pillStartPos.Y.Offset + delta.Y)
         end
     end)
-    UserInputService.InputEnded:Connect(function(inp)
+    trackConnection(UserInputService.InputEnded, function(inp)
         if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
             if pillDrag and not pillMoved then
                 -- tap, toggle window
@@ -1407,39 +1431,63 @@ function EZ:CreateWindow(opts)
     end)
 
     -- hover glow on pill
-    togglePill.MouseEnter:Connect(function()
+    trackConnection(togglePill.MouseEnter, function()
         tween(togglePill, {BackgroundTransparency = 0}, 0.15)
     end)
-    togglePill.MouseLeave:Connect(function()
+    trackConnection(togglePill.MouseLeave, function()
         tween(togglePill, {BackgroundTransparency = 0.15}, 0.15)
     end)
 
     window._togglePill = togglePill
 
     -- show/hide
+    local minimized = false
+    local restorePosition = main.Position
+    local restoreSize = main.Size
+
     function window:Show()
-        if self.Visible then return end
+        if self.Visible and not minimized then return end
+
+        minimized = false
         self.Visible = true
         main.Visible = true
         togglePill.Visible = false
-        main.Size = UDim2.new(0, winW * 0.9, 0, winH * 0.9)
+
+        -- Restore the exact position/size from before minimizing.
+        main.Position = restorePosition
+        main.Size = UDim2.new(0, math.max(1, restoreSize.X.Offset * 0.9), 0, math.max(1, restoreSize.Y.Offset * 0.9))
         main.BackgroundTransparency = 0.5
+
         tween(main, {
-            Size = UDim2.new(0, winW, 0, winH),
+            Size = restoreSize,
             BackgroundTransparency = 0.02
         }, 0.3)
     end
 
     function window:Hide()
-        if not self.Visible then return end
+        if not self.Visible or minimized then return end
+
+        minimized = true
         self.Visible = false
+        restorePosition = main.Position
+        restoreSize = main.Size
+
+        -- Put the restore pill at the window's current center instead of
+        -- always spawning it at the left side of the screen.
+        local center = main.AbsolutePosition + (main.AbsoluteSize / 2)
+        local screen = getScreenSize()
+        local x = clamp(center.X - pillW / 2, 6, math.max(6, screen.X - pillW - 6))
+        local y = clamp(center.Y - pillH / 2, 6, math.max(6, screen.Y - pillH - 6))
+        togglePill.Position = UDim2.fromOffset(x, y)
+
         tween(main, {
-            Size = UDim2.new(0, winW * 0.9, 0, winH * 0.9),
+            Size = UDim2.new(0, math.max(1, restoreSize.X.Offset * 0.9), 0, math.max(1, restoreSize.Y.Offset * 0.9)),
             BackgroundTransparency = 0.6
         }, 0.2)
+
         task.delay(0.22, function()
+            if not minimized or self.Visible or not main.Parent then return end
             main.Visible = false
-            -- skip the pill if an addon (e.g. QuickBar) suppresses it
             if not self._pillSuppressed then
                 togglePill.Visible = true
                 tween(togglePill, {BackgroundTransparency = 0.15}, 0.2)
@@ -1450,7 +1498,11 @@ function EZ:CreateWindow(opts)
     end
 
     function window:Toggle()
-        if self.Visible then self:Hide() else self:Show() end
+        if minimized or not self.Visible then
+            self:Show()
+        else
+            self:Hide()
+        end
     end
 
     function window:Destroy()
@@ -1460,17 +1512,20 @@ function EZ:CreateWindow(opts)
     window.ScreenGui = gui
 
     -- close / minimize
-    closeBtn.MouseButton1Click:Connect(function()
+    trackConnection(windowCloseBtn.MouseButton1Click, function()
         -- full nuke: window + watermark + toggle pill + listeners + all EZ stuff
         EZ:Destroy()
     end)
-    minBtn.MouseButton1Click:Connect(function()
+    trackConnection(minBtn.MouseButton1Click, function()
         window:Hide()
     end)
 
+    window.Minimize = window.Hide
+    window.Restore = window.Show
+
     -- toggle key
     local toggleKey = opts.ToggleKey or Enum.KeyCode.RightShift
-    UserInputService.InputBegan:Connect(function(inp, gpe)
+    trackConnection(UserInputService.InputBegan, function(inp, gpe)
         if gpe then return end
         if inp.KeyCode == toggleKey then
             window:Toggle()
@@ -1530,13 +1585,13 @@ function EZ:CreateWindow(opts)
     })
     addCorner(collapseBtn, 6)
     collapseBtn.Visible = opts.SidebarToggle ~= false
-    collapseBtn.MouseButton1Click:Connect(function()
+    trackConnection(collapseBtn.MouseButton1Click, function()
         window:ToggleSidebar()
     end)
-    collapseBtn.MouseEnter:Connect(function()
+    trackConnection(collapseBtn.MouseEnter, function()
         tween(collapseBtn, {BackgroundTransparency = 0.2}, 0.15)
     end)
-    collapseBtn.MouseLeave:Connect(function()
+    trackConnection(collapseBtn.MouseLeave, function()
         tween(collapseBtn, {BackgroundTransparency = 0.6}, 0.15)
     end)
 
@@ -1545,12 +1600,12 @@ function EZ:CreateWindow(opts)
     -- ~~--------
     if mobile and opts.Gestures ~= false then
         local swipeStart
-        contentArea.InputBegan:Connect(function(inp)
+        trackConnection(contentArea.InputBegan, function(inp)
             if inp.UserInputType == Enum.UserInputType.Touch then
                 swipeStart = Vector2.new(inp.Position.X, inp.Position.Y)
             end
         end)
-        contentArea.InputEnded:Connect(function(inp)
+        trackConnection(contentArea.InputEnded, function(inp)
             if inp.UserInputType ~= Enum.UserInputType.Touch or not swipeStart then return end
             local endP = Vector2.new(inp.Position.X, inp.Position.Y)
             local delta = endP - swipeStart
@@ -1760,15 +1815,15 @@ function EZ:CreateWindow(opts)
             self.ActiveTab = tab
         end
 
-        tabBtn.MouseButton1Click:Connect(activate)
+        trackConnection(tabBtn.MouseButton1Click, activate)
 
         -- hover
-        tabBtn.MouseEnter:Connect(function()
+        trackConnection(tabBtn.MouseEnter, function()
             if self.ActiveTab ~= tab then
                 tween(tabBtn, {BackgroundTransparency = 0.9}, 0.1)
             end
         end)
-        tabBtn.MouseLeave:Connect(function()
+        trackConnection(tabBtn.MouseLeave, function()
             if self.ActiveTab ~= tab then
                 tween(tabBtn, {BackgroundTransparency = 1}, 0.1)
             end
@@ -1871,7 +1926,7 @@ function EZ:CreateWindow(opts)
 
             sub._btn = subBtn
             sub._lbl = subLbl
-            subBtn.MouseButton1Click:Connect(activateSub)
+            trackConnection(subBtn.MouseButton1Click, activateSub)
 
             -- sections inside a subtab: proxy to container
             function sub:AddSection(name)
@@ -1977,7 +2032,7 @@ function EZ:CreateWindow(opts)
             })
 
             local collapsed = false
-            sectionHeader.MouseButton1Click:Connect(function()
+            trackConnection(sectionHeader.MouseButton1Click, function()
                 collapsed = not collapsed
                 tween(arrow, {Rotation = collapsed and -90 or 0}, 0.2)
                 elemContainer.Visible = not collapsed
@@ -2057,7 +2112,7 @@ function EZ:CreateWindow(opts)
                     ZIndex = 9,
                     Parent = elem
                 })
-                clickBtn.MouseButton1Click:Connect(function()
+                trackConnection(clickBtn.MouseButton1Click, function()
                     update(not value)
                 end)
 
@@ -2186,7 +2241,7 @@ function EZ:CreateWindow(opts)
                     Parent = elem
                 })
 
-                clickArea.InputBegan:Connect(function(inp)
+                trackConnection(clickArea.InputBegan, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         if EZ._activeDrag and EZ._activeDrag ~= "slider" then return end
                         sliding = true
@@ -2194,7 +2249,7 @@ function EZ:CreateWindow(opts)
                     end
                 end)
 
-                UserInputService.InputChanged:Connect(function(inp)
+                trackConnection(UserInputService.InputChanged, function(inp)
                     if not sliding then return end
                     if EZ._activeDrag ~= "slider" then return end
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
@@ -2205,7 +2260,7 @@ function EZ:CreateWindow(opts)
                     end
                 end)
 
-                UserInputService.InputEnded:Connect(function(inp)
+                trackConnection(UserInputService.InputEnded, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         if sliding then
                             sliding = false
@@ -2260,15 +2315,15 @@ function EZ:CreateWindow(opts)
                     Parent = btn
                 })
 
-                btn.MouseEnter:Connect(function()
+                trackConnection(btn.MouseEnter, function()
                     tween(btn, {BackgroundTransparency = 0.08}, 0.15)
                     tween(btnStroke, {Color = theme.Accent, Transparency = 0.4}, 0.15)
                 end)
-                btn.MouseLeave:Connect(function()
+                trackConnection(btn.MouseLeave, function()
                     tween(btn, {BackgroundTransparency = 0.3}, 0.15)
                     tween(btnStroke, {Color = theme.Border, Transparency = 0.55}, 0.15)
                 end)
-                btn.MouseButton1Click:Connect(function()
+                trackConnection(btn.MouseButton1Click, function()
                     -- press flash + tiny scale pulse for haptic feel
                     tween(btn, {BackgroundColor3 = theme.Accent}, 0.08)
                     task.delay(0.12, function()
@@ -2445,15 +2500,15 @@ function EZ:CreateWindow(opts)
                             Parent = item
                         })
 
-                        item.MouseEnter:Connect(function()
+                        trackConnection(item.MouseEnter, function()
                             tween(item, {BackgroundTransparency = 0.5}, 0.1)
                         end)
-                        item.MouseLeave:Connect(function()
+                        trackConnection(item.MouseLeave, function()
                             local sel = multi and selected[val] or (selected == val)
                             tween(item, {BackgroundTransparency = sel and 0.6 or 0.8}, 0.1)
                         end)
 
-                        item.MouseButton1Click:Connect(function()
+                        trackConnection(item.MouseButton1Click, function()
                             if multi then
                                 selected[val] = not selected[val]
                             else
@@ -2473,7 +2528,7 @@ function EZ:CreateWindow(opts)
                     end
                 end
 
-                header.MouseButton1Click:Connect(function()
+                trackConnection(header.MouseButton1Click, function()
                     open = not open
                     if open then
                         refreshItems()
@@ -2571,10 +2626,10 @@ function EZ:CreateWindow(opts)
                     Parent = inputBg
                 })
 
-                textBox.Focused:Connect(function()
+                trackConnection(textBox.Focused, function()
                     tween(inputStroke, {Color = theme.Accent, Transparency = 0}, 0.15)
                 end)
-                textBox.FocusLost:Connect(function(enterPressed)
+                trackConnection(textBox.FocusLost, function(enterPressed)
                     tween(inputStroke, {Color = theme.Border, Transparency = 0.5}, 0.15)
                     value = textBox.Text
                     EZ.Flags[id] = value
@@ -2649,13 +2704,13 @@ function EZ:CreateWindow(opts)
                 addCorner(bindBtn, 4)
                 addStroke(bindBtn, theme.Border, 1, 0.6)
 
-                bindBtn.MouseButton1Click:Connect(function()
+                trackConnection(bindBtn.MouseButton1Click, function()
                     listening = true
                     bindBtn.Text = "..."
                     tween(bindBtn, {BackgroundColor3 = theme.Accent}, 0.15)
                 end)
 
-                UserInputService.InputBegan:Connect(function(inp, gpe)
+                trackConnection(UserInputService.InputBegan, function(inp, gpe)
                     if listening then
                         if inp.UserInputType == Enum.UserInputType.Keyboard then
                             key = inp.KeyCode
@@ -2680,7 +2735,7 @@ function EZ:CreateWindow(opts)
                     end
                 end)
 
-                UserInputService.InputEnded:Connect(function(inp)
+                trackConnection(UserInputService.InputEnded, function(inp)
                     if mode == "Hold" and inp.KeyCode == key and active then
                         active = false
                         safecall(`Keybind:{id}`, cb, false)
@@ -2887,13 +2942,13 @@ function EZ:CreateWindow(opts)
 
                 -- canvas drag (claims mutex so slider underneath stays still)
                 local canvasDrag = false
-                canvas.InputBegan:Connect(function(inp)
+                trackConnection(canvas.InputBegan, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         canvasDrag = true
                         EZ._activeDrag = "picker"
                     end
                 end)
-                UserInputService.InputChanged:Connect(function(inp)
+                trackConnection(UserInputService.InputChanged, function(inp)
                     if not canvasDrag then return end
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
                         local pos = Vector2.new(inp.Position.X, inp.Position.Y)
@@ -2902,7 +2957,7 @@ function EZ:CreateWindow(opts)
                         updateColor()
                     end
                 end)
-                UserInputService.InputEnded:Connect(function(inp)
+                trackConnection(UserInputService.InputEnded, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         if canvasDrag then
                             canvasDrag = false
@@ -2913,20 +2968,20 @@ function EZ:CreateWindow(opts)
 
                 -- hue drag
                 local hueDrag = false
-                hueBar.InputBegan:Connect(function(inp)
+                trackConnection(hueBar.InputBegan, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         hueDrag = true
                         EZ._activeDrag = "picker"
                     end
                 end)
-                UserInputService.InputChanged:Connect(function(inp)
+                trackConnection(UserInputService.InputChanged, function(inp)
                     if not hueDrag then return end
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
                         h = clamp((inp.Position.X - hueBar.AbsolutePosition.X) / hueBar.AbsoluteSize.X, 0, 1)
                         updateColor()
                     end
                 end)
-                UserInputService.InputEnded:Connect(function(inp)
+                trackConnection(UserInputService.InputEnded, function(inp)
                     if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
                         if hueDrag then
                             hueDrag = false
@@ -2936,7 +2991,7 @@ function EZ:CreateWindow(opts)
                 end)
 
                 -- hex input
-                hexBox.FocusLost:Connect(function()
+                trackConnection(hexBox.FocusLost, function()
                     local ok, c = pcall(hexToColor3, hexBox.Text)
                     if ok and c then
                         h, s, v = Color3.toHSV(c)
@@ -2944,7 +2999,7 @@ function EZ:CreateWindow(opts)
                     end
                 end)
 
-                swatch.MouseButton1Click:Connect(function()
+                trackConnection(swatch.MouseButton1Click, function()
                     pickerOpen = not pickerOpen
                     if pickerOpen then
                         -- position next to swatch
@@ -3266,8 +3321,8 @@ function EZ:CreateWindow(opts)
                 local dd = section:AddDropdown(id, dropOpts)
 
                 -- auto-refresh on join/leave
-                local conn1 = Players.PlayerAdded:Connect(function() dd:Refresh(buildList()) end)
-                local conn2 = Players.PlayerRemoving:Connect(function() dd:Refresh(buildList()) end)
+                local conn1 = trackConnection(Players.PlayerAdded, function() dd:Refresh(buildList()) end)
+                local conn2 = trackConnection(Players.PlayerRemoving, function() dd:Refresh(buildList()) end)
 
                 function dd:GetPlayers()
                     local sel = dd:Get()
@@ -3325,13 +3380,24 @@ end
 
 -- theme setter with live recolor
 function EZ:SetTheme(themeTable)
-    -- build old->new color map
+    themeTable = themeTable or {}
+
+    -- Build the color map from the old theme first. Updating self.Theme before
+    -- collecting the old values made repeated theme changes unreliable.
     local colorMap = {}
+    local oldTheme = {}
+    for k, v in self.Theme do
+        oldTheme[k] = v
+    end
+
     for k, v in themeTable do
-        if typeof(v) == "Color3" and typeof(self.Theme[k]) == "Color3" then
-            local old = self.Theme[k]
+        if typeof(v) == "Color3" and typeof(oldTheme[k]) == "Color3" then
+            local old = oldTheme[k]
             colorMap[string.format("%d_%d_%d", math.floor(old.R*255+.5), math.floor(old.G*255+.5), math.floor(old.B*255+.5))] = v
         end
+    end
+
+    for k, v in themeTable do
         self.Theme[k] = v
     end
 
@@ -3450,7 +3516,7 @@ function EZ:CreateWatermark(opts)
     local lp = Players.LocalPlayer
 
     local conn
-    conn = RS.RenderStepped:Connect(function()
+    conn = trackConnection(RS.RenderStepped, function()
         frames = frames + 1
         local now = tick()
         if now - lastTick >= 0.5 then
@@ -3589,10 +3655,10 @@ function EZ:AttachTooltip(guiObj, text)
     local function hide()
         if tip then pcall(function() tip:Destroy() end) tip = nil end
     end
-    guiObj.MouseEnter:Connect(show)
-    guiObj.MouseLeave:Connect(hide)
+    trackConnection(guiObj.MouseEnter, show)
+    trackConnection(guiObj.MouseLeave, hide)
     if guiObj:IsA("GuiButton") then
-        guiObj.MouseButton1Click:Connect(hide)
+        trackConnection(guiObj.MouseButton1Click, hide)
     end
 end
 
@@ -3602,6 +3668,7 @@ function EZ:Destroy()
     if self._onDestroy then
         for _, fn in self._onDestroy do pcall(fn) end
     end
+    self._destroyed = true
 
     -- destroy all tracked connections
     if self._connections then
@@ -3636,6 +3703,7 @@ function EZ:Destroy()
     table.clear(self.Flags)
     table.clear(self._listeners)
     table.clear(self._elements)
+    self._onDestroy = nil
 end
 
 function EZ:OnDestroy(fn)
