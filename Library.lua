@@ -23,7 +23,7 @@ local EZ = {
     _onError = nil,
     _activeDrag = nil, -- mutex so picker drag doesn't bleed into slider
     _destroyed = false,
-    _version = "3.2.1"
+    _version = "3.2.2"
 }
 
 -- defaults
@@ -44,7 +44,13 @@ local DEFAULT_THEME = {
     Info = Color3.fromRGB(80, 160, 255),
 }
 
-EZ.Theme = DEFAULT_THEME
+local function cloneTheme(theme)
+    local copy = {}
+    for k, v in theme do copy[k] = v end
+    return copy
+end
+
+EZ.Theme = cloneTheme(DEFAULT_THEME)
 
 -- Track every RBXScriptConnection created by the library so EZ:Destroy()
 -- can reliably disconnect callbacks, including global UserInputService
@@ -52,7 +58,28 @@ EZ.Theme = DEFAULT_THEME
 local function trackConnection(signal, callback)
     local connection = signal:Connect(callback)
     table.insert(EZ._connections, connection)
+
+    -- During CreateWindow, also associate the connection with that window so
+    -- window:Destroy() can clean up only its own callbacks.
+    local owner = EZ._connectionOwner
+    if owner then
+        owner._connections = owner._connections or {}
+        table.insert(owner._connections, connection)
+    end
+
     return connection
+end
+
+local function disconnectConnection(connection)
+    if not connection then return end
+    pcall(function() connection:Disconnect() end)
+
+    for i = #EZ._connections, 1, -1 do
+        if EZ._connections[i] == connection then
+            table.remove(EZ._connections, i)
+            break
+        end
+    end
 end
 
 -- preset themes (devs love these)
@@ -254,10 +281,14 @@ local function color3ToHex(c)
 end
 
 local function hexToColor3(hex)
+    if type(hex) ~= "string" then return nil end
     hex = hex:gsub("#", "")
-    local r = tonumber(hex:sub(1,2), 16) or 0
-    local g = tonumber(hex:sub(3,4), 16) or 0
-    local b = tonumber(hex:sub(5,6), 16) or 0
+    if #hex ~= 6 or not hex:match("^[%x]+$") then return nil end
+
+    local r = tonumber(hex:sub(1,2), 16)
+    local g = tonumber(hex:sub(3,4), 16)
+    local b = tonumber(hex:sub(5,6), 16)
+    if not r or not g or not b then return nil end
     return Color3.fromRGB(r, g, b)
 end
 
@@ -353,10 +384,16 @@ local function setupTooltip(frame, opts)
     end
 end
 
--- cleanup old gui
+-- cleanup old gui(s) from a previous library load. Prefer the executor UI
+-- container when available, otherwise fall back to PlayerGui.
 pcall(function()
-    local old = gethui():FindFirstChild("EZUI")
-    if old then old:Destroy() end
+    local parent = (gethui and gethui()) or Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if parent then
+        for _, name in {"EZUI", "EZNotifs"} do
+            local old = parent:FindFirstChild(name)
+            if old then old:Destroy() end
+        end
+    end
 end)
 
 -- root gui
@@ -423,7 +460,15 @@ function EZ:ResolveIcon(ref)
     if tonumber(ref) then return "rbxassetid://" .. ref end
     -- lucide name via bound icon pack
     if self._icons then
-        local id = self._icons:Get(ref) or self._icons:Fuzzy(ref)
+        local id
+        pcall(function()
+            if type(self._icons.Get) == "function" then
+                id = self._icons:Get(ref)
+            end
+            if not id and type(self._icons.Fuzzy) == "function" then
+                id = self._icons:Fuzzy(ref)
+            end
+        end)
         if id then return id end
     end
     return nil
@@ -864,7 +909,14 @@ function EZ:CreateWindow(opts)
         Visible = true,
         _flags = self.Flags,
         _theme = theme,
+        _connections = {},
+        _destroyed = false,
     }
+
+    -- All connections created synchronously while building this window are
+    -- associated with it. Restore any previous owner before returning.
+    local previousConnectionOwner = EZ._connectionOwner
+    EZ._connectionOwner = window
 
     -- main frame
     local main = create("Frame", {
@@ -1446,6 +1498,7 @@ function EZ:CreateWindow(opts)
     local restoreSize = main.Size
 
     function window:Show()
+        if self._destroyed then return end
         if self.Visible and not minimized then return end
 
         minimized = false
@@ -1465,6 +1518,7 @@ function EZ:CreateWindow(opts)
     end
 
     function window:Hide()
+        if self._destroyed then return end
         if not self.Visible or minimized then return end
 
         minimized = true
@@ -1498,6 +1552,7 @@ function EZ:CreateWindow(opts)
     end
 
     function window:Toggle()
+        if self._destroyed then return end
         if minimized or not self.Visible then
             self:Show()
         else
@@ -1506,8 +1561,26 @@ function EZ:CreateWindow(opts)
     end
 
     function window:Destroy()
+        if self._destroyed then return end
+        self._destroyed = true
+        self.Visible = false
+
+        -- Disconnect only this window's callbacks. This prevents dead windows
+        -- from continuing to react to global UserInputService events.
+        for _, connection in ipairs(self._connections or {}) do
+            disconnectConnection(connection)
+        end
+        table.clear(self._connections or {})
+
         pcall(function() main:Destroy() end)
         pcall(function() togglePill:Destroy() end)
+
+        for i = #EZ.Windows, 1, -1 do
+            if EZ.Windows[i] == self then
+                table.remove(EZ.Windows, i)
+                break
+            end
+        end
     end
     window.ScreenGui = gui
 
@@ -1557,6 +1630,7 @@ function EZ:CreateWindow(opts)
     end
 
     function window:ToggleSidebar()
+        if self._destroyed then return end
         sidebarCollapsed = not sidebarCollapsed
         applySidebar()
     end
@@ -2147,11 +2221,13 @@ function EZ:CreateWindow(opts)
             -- ===
             function section:AddSlider(id, opts)
                 opts = opts or {}
-                local min = opts.Min or 0
-                local max = opts.Max or 100
-                local inc = opts.Increment or 1
+                local min = tonumber(opts.Min) or 0
+                local max = tonumber(opts.Max) or 100
+                if max < min then min, max = max, min end
+                local inc = math.abs(tonumber(opts.Increment) or 1)
+                if inc == 0 then inc = 1 end
                 local suffix = opts.Suffix or ""
-                local value = clamp(opts.Default or min, min, max)
+                local value = clamp(tonumber(opts.Default) or min, min, max)
                 local cb = opts.Callback or function() end
 
                 local elem = create("Frame", {
@@ -2221,7 +2297,8 @@ function EZ:CreateWindow(opts)
                 local function update(v, silent)
                     v = round(clamp(v, min, max), inc)
                     value = v
-                    local pct = (v - min) / (max - min)
+                    local range = max - min
+                    local pct = range > 0 and ((v - min) / range) or 0
                     fill.Size = UDim2.new(pct, 0, 1, 0)
                     sliderThumb.Position = UDim2.new(pct, -7, 0.5, -7)
                     valLabel.Text = tostring(v) .. suffix
@@ -2255,6 +2332,7 @@ function EZ:CreateWindow(opts)
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
                         local absPos = sliderTrack.AbsolutePosition.X
                         local absSize = sliderTrack.AbsoluteSize.X
+                        if absSize <= 0 then return end
                         local rel = clamp((inp.Position.X - absPos) / absSize, 0, 1)
                         update(min + (max - min) * rel)
                     end
@@ -2952,8 +3030,10 @@ function EZ:CreateWindow(opts)
                     if not canvasDrag then return end
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
                         local pos = Vector2.new(inp.Position.X, inp.Position.Y)
-                        s = clamp((pos.X - canvas.AbsolutePosition.X) / canvas.AbsoluteSize.X, 0, 1)
-                        v = 1 - clamp((pos.Y - canvas.AbsolutePosition.Y) / canvas.AbsoluteSize.Y, 0, 1)
+                        local w, hgt = canvas.AbsoluteSize.X, canvas.AbsoluteSize.Y
+                        if w <= 0 or hgt <= 0 then return end
+                        s = clamp((pos.X - canvas.AbsolutePosition.X) / w, 0, 1)
+                        v = 1 - clamp((pos.Y - canvas.AbsolutePosition.Y) / hgt, 0, 1)
                         updateColor()
                     end
                 end)
@@ -2977,7 +3057,9 @@ function EZ:CreateWindow(opts)
                 trackConnection(UserInputService.InputChanged, function(inp)
                     if not hueDrag then return end
                     if inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch then
-                        h = clamp((inp.Position.X - hueBar.AbsolutePosition.X) / hueBar.AbsoluteSize.X, 0, 1)
+                        local width = hueBar.AbsoluteSize.X
+                        if width <= 0 then return end
+                        h = clamp((inp.Position.X - hueBar.AbsolutePosition.X) / width, 0, 1)
                         updateColor()
                     end
                 end)
@@ -3123,8 +3205,9 @@ function EZ:CreateWindow(opts)
             -- ===
             function section:AddProgressBar(id, opts)
                 opts = opts or {}
-                local progress = opts.Default or 0
-                local maxVal = opts.Max or 100
+                local maxVal = tonumber(opts.Max) or 100
+                if maxVal <= 0 then maxVal = 100 end
+                local progress = clamp(tonumber(opts.Default) or 0, 0, maxVal)
                 local showText = opts.ShowText ~= false
 
                 local elem = create("Frame", {
@@ -3160,7 +3243,7 @@ function EZ:CreateWindow(opts)
                 addStroke(barBg, theme.Border, 1, 0.6)
 
                 local fill = create("Frame", {
-                    Size = UDim2.new(math.clamp(progress / maxVal, 0, 1), 0, 1, 0),
+                    Size = UDim2.new(maxVal > 0 and math.clamp(progress / maxVal, 0, 1) or 0, 0, 1, 0),
                     BackgroundColor3 = opts.Color or theme.Accent,
                     BorderSizePixel = 0,
                     ZIndex = 8,
@@ -3188,13 +3271,15 @@ function EZ:CreateWindow(opts)
                 local bar = { Value = progress }
                 function bar:Set(v)
                     progress = math.clamp(v, 0, maxVal)
-                    tween(fill, {Size = UDim2.new(progress / maxVal, 0, 1, 0)}, 0.12)
+                    local pct = maxVal > 0 and (progress / maxVal) or 0
+                    tween(fill, {Size = UDim2.new(pct, 0, 1, 0)}, 0.12)
                     if pctLbl then pctLbl.Text = tostring(math.floor(progress)) .. "/" .. tostring(maxVal) end
                     EZ.Flags[id] = progress
                     fireListeners(id, progress)
                 end
                 function bar:SetMax(m)
-                    maxVal = m
+                    maxVal = tonumber(m) or maxVal
+                    if maxVal <= 0 then maxVal = 1 end
                     bar:Set(progress)
                 end
                 function bar:SetColor(c) fill.BackgroundColor3 = c end
@@ -3375,6 +3460,7 @@ function EZ:CreateWindow(opts)
     end
 
     table.insert(self.Windows, window)
+    EZ._connectionOwner = previousConnectionOwner
     return window
 end
 
@@ -3404,10 +3490,16 @@ function EZ:SetTheme(themeTable)
     -- recolor all descendants of EZUI + EZNotifs
     local colorProps = {"BackgroundColor3", "TextColor3", "PlaceholderColor3", "ImageColor3", "ScrollBarImageColor3"}
     local containers = {}
+    if gui and gui.Parent then table.insert(containers, gui) end
+    if notifGui and notifGui.Parent then table.insert(containers, notifGui) end
+
     pcall(function()
-        for _, g in gethui():GetChildren() do
-            if g.Name == "EZUI" or g.Name == "EZNotifs" then
-                table.insert(containers, g)
+        local hui = (gethui and gethui()) or Players.LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if hui then
+            for _, g in hui:GetChildren() do
+                if (g.Name == "EZUI" or g.Name == "EZNotifs") and not table.find(containers, g) then
+                    table.insert(containers, g)
+                end
             end
         end
     end)
@@ -3589,7 +3681,7 @@ end
 -- AUTO-UPDATE CHECK (fetches latest tag from github)
 -- ~~
 function EZ:CheckForUpdate(repo)
-    repo = repo or "DexCodeSX/EZ"
+    repo = repo or "Beastaive22/EZ-Hub"
     local url = "https://api.github.com/repos/" .. repo .. "/releases/latest"
     local ok, resp = pcall(function()
         if request then
@@ -3664,40 +3756,41 @@ end
 
 -- cleanup: destroy all EZ windows, clear listeners, disconnect everything
 function EZ:Destroy()
-    -- fire cleanup listener if registered
+    if self._destroyed then return end
+    self._destroyed = true
+
+    -- Notify registered cleanup handlers before removing the callbacks they
+    -- may rely on. Never let one cleanup handler block the others.
     if self._onDestroy then
         for _, fn in self._onDestroy do pcall(fn) end
     end
-    self._destroyed = true
 
-    -- destroy all tracked connections
-    if self._connections then
-        for _, c in self._connections do
-            pcall(function() c:Disconnect() end)
-        end
-        table.clear(self._connections)
+    -- Disconnect every tracked connection, including window/global handlers.
+    for _, c in ipairs(self._connections or {}) do
+        pcall(function() c:Disconnect() end)
     end
+    table.clear(self._connections or {})
+    self._connectionOwner = nil
+    self._activeDrag = nil
 
-    -- nuke watermark if exists
     if self._watermark then
         pcall(function() self._watermark:Destroy() end)
         self._watermark = nil
     end
 
-    -- destroy all window screengui's
-    for _, w in self.Windows do
-        if w and w.ScreenGui then
-            pcall(function() w.ScreenGui:Destroy() end)
+    -- Keep the root ScreenGuis alive but empty. This makes EZ reusable after
+    -- EZ:Destroy() / the close button instead of leaving dead ScreenGui
+    -- references that CreateWindow() cannot parent into again.
+    pcall(function()
+        for _, child in gui:GetChildren() do
+            child:Destroy()
         end
-    end
-
-    -- also blow away any leftover gui under gethui named EZ/EZUI/EZNotifs
-    local hui = (gethui and gethui()) or game:GetService("CoreGui")
-    for _, g in pairs(hui:GetChildren()) do
-        if g.Name == "EZ" or g.Name == "EZUI" or g.Name == "EZNotifs" then
-            pcall(function() g:Destroy() end)
+    end)
+    pcall(function()
+        for _, child in notifGui:GetChildren() do
+            child:Destroy()
         end
-    end
+    end)
 
     table.clear(self.Windows)
     table.clear(self.Flags)
