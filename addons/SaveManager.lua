@@ -1,12 +1,12 @@
 --[[
-    Velvet SaveManager
-    Config save/load + named profiles for Velvet UI Library
+    EZ SaveManager
+    Config save/load + named profiles for EZ UI Library
 ]]
 
 local HttpService = game:GetService("HttpService")
 
 local SaveManager = {
-    Folder = "VelvetConfigs",
+    Folder = "EZConfigs",
     Library = nil,
     _activeProfile = nil,
 }
@@ -232,7 +232,7 @@ function SaveManager:BuildProfileUI(section)
     local profiles = mgr:GetProfiles()
     local active = mgr:GetActiveProfile()
 
-    local dd = section:AddDropdown("_VelvetProfile", {
+    local dd = section:AddDropdown("_EZProfile", {
         Text = "Profile",
         Values = #profiles > 0 and profiles or {"(none)"},
         Default = active or (profiles[1] or "(none)"),
@@ -257,7 +257,7 @@ function SaveManager:BuildProfileUI(section)
         Text = "Save Profile",
         Callback = function()
             local name = active or "default"
-            local v = lib.Flags["_VelvetProfile"]
+            local v = lib.Flags["_EZProfile"]
             if v and v ~= "(none)" then name = v end
             mgr:SaveProfile(name)
             refreshDD()
@@ -284,7 +284,7 @@ function SaveManager:BuildProfileUI(section)
     section:AddButton({
         Text = "Delete Profile",
         Callback = function()
-            local v = lib.Flags["_VelvetProfile"]
+            local v = lib.Flags["_EZProfile"]
             if not v or v == "(none)" then return end
             mgr:DeleteProfile(v)
             refreshDD()
