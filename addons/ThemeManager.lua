@@ -1,6 +1,6 @@
 --[[
-    Velvet ThemeManager
-    Theme switching for Velvet UI Library
+    EZ ThemeManager
+    Theme switching for EZ UI Library
 ]]
 
 local ThemeManager = {
@@ -103,7 +103,7 @@ function ThemeManager:SetTheme(name)
     end
     -- save preference
     pcall(function()
-        writefile("VelvetTheme.txt", name)
+        writefile("EZTheme.txt", name)
     end)
     return true
 end
@@ -124,7 +124,7 @@ end
 -- auto-load saved theme
 function ThemeManager:LoadSaved()
     pcall(function()
-        local saved = readfile("VelvetTheme.txt")
+        local saved = readfile("EZTheme.txt")
         if saved and self.Themes[saved] then
             self:SetTheme(saved)
         end
